@@ -1,7 +1,5 @@
 # JSON serialization / deserialization module for Jai
 
-*Attention: This version requires Jai beta 0.1.050! Please use [the 0.1.049 branch](https://github.com/rluba/jason/tree/release/beta_0.1.049) for older betas.*
-
 This module offers two interfaces:
 * one uses a "generic tree" built from `JSON_Value`
 * the other is a typed version that serializes / deserializes your custom data structures.
@@ -59,4 +57,4 @@ See [`module.jai`](./module.jai) for details and additional parameters.
 
 ## Dependencies
 
-This module uses [the `unicode_utils` module](https://github.com/rluba/jai-unicode).
+This module uses [the `unicode_utils` module](https://github.com/rluba/jai-unicode), which is included as a submodule.

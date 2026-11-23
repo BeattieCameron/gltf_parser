@@ -599,10 +599,10 @@ gltf_parse_string :: (gltf_buffer: string) -> GLTF_Data {
 
 gltf_parse_file :: (filepath: string) -> GLTF_Data {
   path, basename, extension := path_decomp(filepath);
-
+  
   gltf_string, success := read_entire_file(filepath);
   defer free(gltf_string);
-
+  
   if !success {
     crash("Reading % failed. Are you sure that your file exists?", filepath);
   }
@@ -620,22 +620,102 @@ gltf_load_buffers :: (gltf_data: *GLTF_Data) -> bool {
   if gltf_data.is_glb return true;
 
   folder_path := gltf_data.filepath;
-  folder_path.count = find_index_from_right(gltf_data.filepath, #char "/") + 1;
+  slash_index := find_index_from_right(gltf_data.filepath, #char "/");
+  if slash_index == -1 then slash_index = find_index_from_right(gltf_data.filepath, #char "\\");
+  
+  if slash_index != -1 then folder_path.count = slash_index + 1;
+  else folder_path.count = 0;
 
   success := true;
 
   for * buffer: gltf_data.buffers {
-    bin_path := join(folder_path, buffer.uri);
-    defer free(bin_path);
+    // 1. CHECK FOR EMBEDDED BASE64 DATA
+    if begins_with(buffer.uri, "data:") {
+      // Find where the actual base64 data payload starts (after the comma)
+      comma_index := find_index_from_left(buffer.uri, #char ",");
+      if comma_index == -1 {
+        success = false;
+        continue;
+      }
 
-    data, success := read_entire_file(bin_path ,, gltf_data.allocator);
-    if !success then success = false;
+      // Slice out just the base64 string
+      base64_string := buffer.uri;
+      advance(*base64_string, comma_index + 1);
 
-    buffer.data = data;
+      // Decode the data straight into memory
+      decoded_data := base64_decode(base64_string,, allocator = gltf_data.allocator);
+      if !decoded_data.data {
+        success = false;
+        continue;
+      }
+
+      buffer.data = decoded_data;
+    } else {
+      // 2. FALLBACK TO NORMAL FILE LOADING
+      bin_path := join(folder_path, buffer.uri,, allocator = gltf_data.allocator);
+      defer free(bin_path,, gltf_data.allocator);
+
+      file_data, file_success := read_entire_file(bin_path ,, gltf_data.allocator);
+      if !file_success {
+        success = false;
+        continue;
+      }
+
+      buffer.data = file_data;
+    }
   }
 
   return success;
 }
+// gltf_load_buffers :: (gltf_data: *GLTF_Data) -> bool {
+//   if gltf_data.is_glb return true;
+
+//   folder_path := gltf_data.filepath;
+//   folder_path.count = find_index_from_right(gltf_data.filepath, #char "/") + 1;
+
+//   success := true;
+
+//   for * buffer: gltf_data.buffers {
+//     print("hehe %\n hehe", buffer.uri);
+
+//     bin_path := join(folder_path, buffer.uri);
+//     defer free(bin_path);
+
+//     data, success := read_entire_file(bin_path ,, gltf_data.allocator);
+//     if !success then success = false;
+
+//     buffer.data = data;
+//   }
+
+//   return success;
+// }
+
+// gltf_load_buffers :: (gltf_data: *GLTF_Data) -> bool {
+//   if gltf_data.is_glb return true;
+
+//   folder_path := gltf_data.filepath;
+//   folder_path.count = find_index_from_right(gltf_data.filepath, #char "/") + 1;
+
+//   print("%\n", folder_path);
+
+//   success := true;
+
+//   for * buffer: gltf_data.buffers {
+
+
+//     // PASS THE ALLOCATOR HERE SO JOIN DOES NOT USE THE TEMP ALLOCATOR
+//     bin_path := join(folder_path, buffer.uri,, allocator = gltf_data.allocator);
+//     defer free(bin_path,, gltf_data.allocator);
+
+//     // Fixed shadowing bug: using file_success instead of success
+//     data, file_success := read_entire_file(bin_path ,, gltf_data.allocator);
+//     if !file_success then success = false;
+
+//     buffer.data = data;
+//   }
+
+//   return success;
+// }
 
 // @todo: Should free the string.
 gltf_debug_print :: (gltf_data: GLTF_Data) {
@@ -808,7 +888,7 @@ GLTF_Node :: struct {
   children : [..] int;
   // A floating-point 4x4 transformation matrix stored in column-major order.
   has_matrix := false;
-  matrix     := float.[0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  matrix     := float.[1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
   // The node’s unit quaternion rotation in the order (x, y, z, w),
   // where w is the scalar.
   has_rotation := false;
@@ -1363,14 +1443,15 @@ fill_parents :: (data: *GLTF_Data, node: *GLTF_Node, parent_index: int) {
   }
 }
 
-get_local_transform :: (using node: GLTF_Node) -> Matrix4 {
+get_local_transform :: (using node: *GLTF_Node) -> Matrix4 {
   if has_matrix {
     transform : Matrix4 = ---;
-    for matrix transform.floats[it_index] = it;
-
-    // Careful here, we transpose the matrix because glTF
-    // store column-major matrices.
-    return transpose(transform);
+    for row: 0..3 {
+      for column: 0..3 {
+        transform.coef[row][column] = matrix[column * 4 + row];
+      }
+    }
+    return transform;
   }
 
   t := make_vector3(translation);
@@ -1581,19 +1662,39 @@ get_array :: (json_val: JSON_Value, key: string) -> []JSON_Value, bool {
   return val.array, success;
 }
 
-get_string :: (json_val: JSON_Value, key: string) -> string {
-  str := get(json_val, key, .STRING).str;
-  return copy_string(str);
+get_string :: (json_val: JSON_Value, key: string, default := "") -> string {
+  val, success := get(json_val, key, .STRING);
+  if !success {
+    return copy_string(default);
+  }
+  return copy_string(val.str);
 }
 
 get :: (json_val     : JSON_Value,
         key          : string,
         expected_type: JSON_Type) -> JSON_Value, bool {
 
-  assert(json_val.type == .OBJECT);
+  if json_val.type != .OBJECT || json_val.object == null {
+    val := JSON_Value.{};
+    val.type = expected_type;
+    if expected_type == {
+      case .OBJECT; #through;
+      case .NULL;
+        val.object = null;
+      case .BOOLEAN;
+        val.boolean = false;
+      case .NUMBER;
+        val.number = 0;
+      case .STRING ;
+        val.str = "";
+      case .ARRAY ;
+        val.array = JSON_Value.[];
+    }
+    return val, false;
+  }
 
   table := json_val.object;
-  val, success := table_find(table, key);
+  success, val := table_find(table, key);
 
   // Default value when value was not found.
   if !success {
@@ -1629,5 +1730,6 @@ crash :: (msg: string, args: ..Any) {
 #import "String";
 #import "Hash_Table";
 #import "Math";
+#import "Base64";
 
 #import, dir "modules/jaison";
